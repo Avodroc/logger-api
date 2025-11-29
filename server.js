@@ -1,7 +1,10 @@
 import express from "express";
 import mysql from "mysql2";
+import cors from "cors";
 
 const app = express();
+
+app.use(cors()); // <-- allows requests from any origin
 app.use(express.json());
 
 // DB connection pool
