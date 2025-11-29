@@ -15,15 +15,15 @@ const db = mysql.createPool({
 
 // Main logging endpoint
 app.post("/log", (req, res) => {
-    const { code, matched, browser, platform, status, ip } = req.body;
+    const { code, url, browser, platform, status } = req.body;
 
     const sql = `
-        INSERT INTO Logs 
-        (CodeEntered, Matched, Browser, Platform, Status, IP)
-        VALUES (?, ?, ?, ?, ?, ?)
+        INSERT INTO logs 
+        (code, url, status, browser, platform)
+        VALUES (?, ?, ?, ?, ?)
     `;
 
-    db.query(sql, [code, matched, browser, platform, status, ip], (err) => {
+    db.query(sql, [code, url, status, browser, platform], (err) => {
         if (err) {
             console.error(err);
             return res.status(500).json({ success: false, error: "DB error" });
