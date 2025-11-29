@@ -1,13 +1,14 @@
 import express from "express";
 import mysql from "mysql2";
-import cors from "cors";
+import cors from "cors"; // Added for CORS support
 
 const app = express();
 
-app.use(cors()); // <-- allows requests from any origin
+// Enable CORS for all origins (you can restrict to Carrd later if needed)
+app.use(cors());
 app.use(express.json());
 
-// DB connection pool
+// DB connection pool using Render environment variables
 const db = mysql.createPool({
     host: process.env.DB_HOST,
     user: process.env.DB_USER,
@@ -16,9 +17,9 @@ const db = mysql.createPool({
     port: process.env.DB_PORT
 });
 
-// Main logging endpoint
+// Logging endpoint
 app.post("/log", (req, res) => {
-    const { code, url, browser, platform, status } = req.body;
+    const { code, url, status, browser, platform } = req.body;
 
     const sql = `
         INSERT INTO logs 
@@ -28,7 +29,7 @@ app.post("/log", (req, res) => {
 
     db.query(sql, [code, url, status, browser, platform], (err) => {
         if (err) {
-            console.error(err);
+            console.error("DB Insert Error:", err);
             return res.status(500).json({ success: false, error: "DB error" });
         }
 
@@ -36,7 +37,7 @@ app.post("/log", (req, res) => {
     });
 });
 
-// Render requires using process.env.PORT
+// Start server on Render-assigned port
 app.listen(process.env.PORT || 3000, () => {
     console.log("API running on Render");
 });
