@@ -23,7 +23,26 @@ const pool = mysql.createPool({
   queueLimit: 0,
 });
 
-// /check endpoint
+// Helper function for simple OS detection
+function detectOS(ua) {
+  if (ua.includes("Windows")) return "Windows";
+  if (ua.includes("Mac")) return "MacOS";
+  if (ua.includes("Android")) return "Android";
+  if (ua.includes("Linux")) return "Linux";
+  if (ua.includes("iPhone") || ua.includes("iPad")) return "iOS";
+  return "Unknown";
+}
+
+// Helper function for simple browser detection
+function detectBrowser(ua) {
+  if (ua.includes("Chrome") && !ua.includes("Edge")) return "Chrome";
+  if (ua.includes("Safari") && !ua.includes("Chrome")) return "Safari";
+  if (ua.includes("Firefox")) return "Firefox";
+  if (ua.includes("Edge")) return "Edge";
+  return "Other";
+}
+
+// Check code endpoint
 app.post("/check", async (req, res) => {
   const start = Date.now();
   const { code } = req.body;
@@ -32,6 +51,13 @@ app.post("/check", async (req, res) => {
   const referer = req.headers.referer || null;
   const languages = req.headers["accept-language"] || null;
 
+  // Device type
+  const deviceType = ua.includes("Mobile") || ua.includes("Android") || ua.includes("iPhone") ? "mobile" : "desktop";
+
+  // Detect OS and Browser
+  const osName = detectOS(ua);
+  const browserName = detectBrowser(ua);
+
   // GeoIP lookup
   const geo = geoip.lookup(ip) || {};
   const country = geo.country || null;
@@ -39,14 +65,13 @@ app.post("/check", async (req, res) => {
   const city = geo.city || null;
 
   try {
-    // Check if code exists in access_codes
-    const [rows] = await pool.query(
+    // Get access code
+    const [row] = await pool.query(
       "SELECT * FROM access_codes WHERE code = ? LIMIT 1",
       [code]
     );
-
-    const valid = rows.length > 0;
-    const url = valid ? rows[0].url : null;
+    const valid = row.length > 0;
+    const url = valid ? row[0].url : null;
     const status = valid ? "Success" : "Failed";
 
     // Count previous attempts
@@ -68,9 +93,9 @@ app.post("/check", async (req, res) => {
         ua,
         ua,
         referer,
-        "desktop", // default device type
-        "Unknown", // default OS
-        "Unknown", // default browser name
+        deviceType,
+        osName,
+        browserName,
         languages,
         attempt_number,
         ip,
@@ -84,28 +109,6 @@ app.post("/check", async (req, res) => {
     res.json({ valid, url });
   } catch (err) {
     console.error("Check endpoint error:", err);
-    res.status(500).json({ error: "Internal server error" });
-  }
-});
-
-// /admin/add endpoint
-app.post("/admin/add", async (req, res) => {
-  const auth = req.headers.authorization || "";
-  if (!auth.startsWith("Bearer ") || auth.split(" ")[1] !== process.env.ADMIN_TOKEN) {
-    return res.status(403).json({ error: "Unauthorized" });
-  }
-
-  const { code, url } = req.body;
-  if (!code || !url) return res.status(400).json({ error: "Missing code or url" });
-
-  try {
-    await pool.query(
-      "INSERT INTO access_codes (code, url) VALUES (?, ?)",
-      [code, url]
-    );
-    res.json({ success: true });
-  } catch (err) {
-    console.error("Admin add error:", err);
     res.status(500).json({ error: "Internal server error" });
   }
 });
