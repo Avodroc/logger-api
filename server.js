@@ -24,15 +24,15 @@ const pool = mysql.createPool({
   queueLimit: 0,
 });
 
-// Check code endpoint
+// Check code
 app.post("/check", async (req, res) => {
   const start = Date.now();
   const { code } = req.body;
   const ip = req.headers["x-forwarded-for"] || req.socket.remoteAddress || "";
   const ua = req.headers["user-agent"] || "";
-  const referer = req.headers.referer || null;
-  const deviceType = /Mobi|Android/i.test(ua) ? "mobile" : "desktop";
   const languages = req.headers["accept-language"] || null;
+  const deviceType = /Mobi|Android/i.test(ua) ? "mobile" : "desktop";
+  const referer = req.headers.referer || "Direct";
 
   // GeoIP lookup
   const geo = geoip.lookup(ip) || {};
@@ -41,16 +41,16 @@ app.post("/check", async (req, res) => {
   const city = geo.city || null;
 
   try {
-    // Get all access codes
+    // Get all codes from DB
     const [rows] = await pool.query("SELECT * FROM access_codes");
     let valid = false;
-    let url = null;
+    let url = "Failed";
 
-    for (let row of rows) {
-      const match = await bcrypt.compare(code, row.code_hash);
-      if (match) {
+    for (const row of rows) {
+      // Check if code matches hash
+      if (await bcrypt.compare(code, row.code_hash)) {
         valid = true;
-        url = row.url;
+        url = row.url || "Failed";
         break;
       }
     }
@@ -77,8 +77,8 @@ app.post("/check", async (req, res) => {
         ua,
         referer,
         deviceType,
-        "Unknown",
-        "Unknown",
+        "Unknown", // OS detection removed for now
+        "Unknown", // Browser name detection removed for now
         languages,
         attempt_number,
         ip,
@@ -96,21 +96,14 @@ app.post("/check", async (req, res) => {
   }
 });
 
-// Admin add endpoint
-app.post("/admin/add", async (req, res) => {
-  const authHeader = req.headers.authorization || "";
-  const token = authHeader.split(" ")[1];
-  if (token !== process.env.ADMIN_TOKEN) return res.status(403).send("Forbidden");
-
-  const { code, url } = req.body;
-  const hashed = await bcrypt.hash(code, 10);
-
+// Admin logs
+app.get("/admin/logs", async (req, res) => {
   try {
-    await pool.query("INSERT INTO access_codes (code_hash, url) VALUES (?, ?)", [hashed, url]);
-    res.send("Added");
+    const [rows] = await pool.query("SELECT * FROM logs ORDER BY created_at DESC");
+    res.json(rows);
   } catch (err) {
-    console.error("Admin add error:", err);
-    res.status(500).send("Internal server error");
+    console.error("Admin logs error:", err);
+    res.status(500).json({ error: "Internal server error" });
   }
 });
 
