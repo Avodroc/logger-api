@@ -23,17 +23,13 @@ const pool = mysql.createPool({
   queueLimit: 0,
 });
 
-// Check code
+// /check endpoint
 app.post("/check", async (req, res) => {
   const start = Date.now();
   const { code } = req.body;
   const ip = req.headers["x-forwarded-for"] || req.socket.remoteAddress || "";
   const ua = req.headers["user-agent"] || "";
-
-  // Defaults since UAParser is removed
-  const browserName = "Unknown";
-  const osName = "Unknown";
-  const deviceType = "Unknown";
+  const referer = req.headers.referer || null;
   const languages = req.headers["accept-language"] || null;
 
   // GeoIP lookup
@@ -43,13 +39,14 @@ app.post("/check", async (req, res) => {
   const city = geo.city || null;
 
   try {
-    const [row] = await pool.query(
+    // Check if code exists in access_codes
+    const [rows] = await pool.query(
       "SELECT * FROM access_codes WHERE code = ? LIMIT 1",
       [code]
     );
 
-    const valid = row.length > 0;
-    const url = valid ? row[0].url : null;
+    const valid = rows.length > 0;
+    const url = valid ? rows[0].url : null;
     const status = valid ? "Success" : "Failed";
 
     // Count previous attempts
@@ -70,10 +67,10 @@ app.post("/check", async (req, res) => {
         status,
         ua,
         ua,
-        req.headers.referer || null,
-        deviceType,
-        osName,
-        browserName,
+        referer,
+        "desktop", // default device type
+        "Unknown", // default OS
+        "Unknown", // default browser name
         languages,
         attempt_number,
         ip,
@@ -87,6 +84,28 @@ app.post("/check", async (req, res) => {
     res.json({ valid, url });
   } catch (err) {
     console.error("Check endpoint error:", err);
+    res.status(500).json({ error: "Internal server error" });
+  }
+});
+
+// /admin/add endpoint
+app.post("/admin/add", async (req, res) => {
+  const auth = req.headers.authorization || "";
+  if (!auth.startsWith("Bearer ") || auth.split(" ")[1] !== process.env.ADMIN_TOKEN) {
+    return res.status(403).json({ error: "Unauthorized" });
+  }
+
+  const { code, url } = req.body;
+  if (!code || !url) return res.status(400).json({ error: "Missing code or url" });
+
+  try {
+    await pool.query(
+      "INSERT INTO access_codes (code, url) VALUES (?, ?)",
+      [code, url]
+    );
+    res.json({ success: true });
+  } catch (err) {
+    console.error("Admin add error:", err);
     res.status(500).json({ error: "Internal server error" });
   }
 });
