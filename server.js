@@ -7,9 +7,8 @@ import bcrypt from "bcrypt";
 const app = express();
 app.use(cors());
 app.use(express.json());
-app.use(express.urlencoded({ extended: false }));
 
-// --- DB Pool ---
+// DB pool using env vars
 const pool = mysql.createPool({
   host: process.env.DB_HOST,
   user: process.env.DB_USER,
@@ -21,77 +20,78 @@ const pool = mysql.createPool({
   queueLimit: 0
 });
 
-// --- Helpers ---
+// Basic helpers
 const getClientIp = (req) => {
   const forwarded = req.headers["x-forwarded-for"];
-  return forwarded ? forwarded.split(",")[0].trim() : req.ip || req.connection?.remoteAddress || "";
+  if (forwarded) return forwarded.split(",")[0].trim();
+  return req.ip || req.connection?.remoteAddress || "";
 };
 
-// --- Rate limiter ---
+// Rate limiting: 10 requests per minute per IP
 const validateLimiter = rateLimit({
-  windowMs: 60 * 1000, // 1 minute
+  windowMs: 60 * 1000, 
   max: 10,
   standardHeaders: true,
   legacyHeaders: false,
   message: { error: "Too many attempts, slow down." }
 });
 
-// --- /check endpoint ---
+// Validate code endpoint
 app.post("/check", validateLimiter, async (req, res) => {
+  const { code, browser } = req.body ?? {};
+  const ip = getClientIp(req);
+  const user_agent = req.headers["user-agent"] || browser || "";
+
+  if (typeof code !== "string") {
+    return res.status(400).json({ error: "Missing code" });
+  }
+
   try {
-    if (!req.body || typeof req.body.code !== "string") {
-      return res.status(400).json({ error: "Missing or invalid code" });
-    }
-
-    const code = req.body.code.trim();
-    if (!code) return res.status(400).json({ error: "Code cannot be empty" });
-
-    const ip = getClientIp(req);
-    const user_agent = req.headers["user-agent"] || "";
-
     const [rows] = await pool.query("SELECT id, code_hash, target_url FROM access_codes");
-    let foundUrl = "";
 
+    let foundUrl = "";
     for (const r of rows) {
-      try {
-        const match = await bcrypt.compare(code, r.code_hash);
-        if (match) {
-          foundUrl = r.target_url;
-          break;
-        }
-      } catch (err) {
-        console.error("bcrypt compare error:", err, r.id);
+      const match = await bcrypt.compare(code, r.code_hash);
+      if (match) {
+        foundUrl = r.target_url;
+        break;
       }
     }
 
     const status = foundUrl ? "Success" : "Failed";
 
+    // Log attempt (no platform column)
     await pool.execute(
-      "INSERT INTO logs (code, url, status, browser, platform, ip, user_agent) VALUES (?, ?, ?, ?, ?, ?, ?)",
-      [code, foundUrl, status, req.body.browser || "", req.body.platform || "", ip, user_agent]
+      "INSERT INTO logs (code, url, status, browser, ip, user_agent) VALUES (?, ?, ?, ?, ?, ?)",
+      [code, foundUrl, status, browser || user_agent, ip, user_agent]
     );
 
     return res.json({ valid: Boolean(foundUrl), url: foundUrl });
+
   } catch (err) {
     console.error("Check endpoint error:", err);
-    return res.status(500).json({ error: "Internal server error" });
+    return res.status(500).json({ error: "Server error" });
   }
 });
 
-// --- Admin middleware ---
+//
+// --- ADMIN PANEL ---
+//
 const requireAdmin = (req, res, next) => {
   const header = req.headers["authorization"];
   const token = header && header.startsWith("Bearer ") ? header.slice(7) : req.query?.token;
-  if (!token || token !== process.env.ADMIN_TOKEN) return res.status(401).send("Unauthorized");
+  if (!token || token !== process.env.ADMIN_TOKEN) {
+    return res.status(401).send("Unauthorized");
+  }
   next();
 };
 
-// --- Admin UI ---
+// Admin UI
 app.get("/admin", requireAdmin, async (req, res) => {
   try {
     const [rows] = await pool.query("SELECT id, target_url, created_at FROM access_codes ORDER BY created_at DESC");
     let html = `<!doctype html><html><head><meta charset="utf-8"><title>Admin</title></head><body>
-      <h2>Access Codes</h2>
+      <h2>Access Codes (hashed)</h2>
       <form method="post" action="/admin/add">
         <label>Code (plaintext): <input name="code" /></label>
         <label>Target URL: <input name="url" size="60"/></label>
@@ -112,39 +112,42 @@ app.get("/admin", requireAdmin, async (req, res) => {
   }
 });
 
-// --- Admin add ---
+// Parse urlencoded bodies for admin forms
+app.use(express.urlencoded({ extended: false }));
+
+// Add a new code
 app.post("/admin/add", requireAdmin, async (req, res) => {
-  const code = req.body.code?.trim();
-  const url = req.body.url?.trim();
+  const code = req.body.code ?? "";
+  const url = req.body.url ?? "";
   if (!code || !url) return res.status(400).send("Missing fields");
 
   try {
     const hash = await bcrypt.hash(code, 10);
     await pool.execute("INSERT INTO access_codes (code_hash, target_url) VALUES (?, ?)", [hash, url]);
-    res.redirect("/admin?added=1");
+    return res.redirect("/admin?added=1");
   } catch (err) {
     console.error("Admin add error:", err);
-    res.status(500).send("Server error");
+    return res.status(500).send("Server error");
   }
 });
 
-// --- Admin delete ---
+// Delete code by ID
 app.post("/admin/delete", requireAdmin, async (req, res) => {
   const id = parseInt(req.body.id, 10);
   if (!id) return res.status(400).send("Missing id");
   try {
     await pool.execute("DELETE FROM access_codes WHERE id = ?", [id]);
-    res.redirect("/admin?deleted=1");
+    return res.redirect("/admin?deleted=1");
   } catch (err) {
     console.error("Admin delete error:", err);
-    res.status(500).send("Server error");
+    return res.status(500).send("Server error");
   }
 });
 
-// --- Admin logs ---
+// Recent logs
 app.get("/admin/logs", requireAdmin, async (req, res) => {
   try {
-    const [rows] = await pool.query("SELECT id, code, url, status, ip, user_agent, created_at FROM logs ORDER BY created_at DESC LIMIT 200");
+    const [rows] = await pool.query("SELECT id, code, url, status, browser, ip, user_agent, created_at FROM logs ORDER BY created_at DESC LIMIT 200");
     res.json(rows);
   } catch (err) {
     console.error("Admin logs error:", err);
@@ -152,9 +155,9 @@ app.get("/admin/logs", requireAdmin, async (req, res) => {
   }
 });
 
-// --- Health check ---
+// Health check
 app.get("/", (req, res) => res.json({ ok: true }));
 
-// --- Start server ---
+// Start server
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => console.log(`API running on port ${PORT}`));
