@@ -2,7 +2,6 @@ import express from "express";
 import mysql from "mysql2/promise";
 import cors from "cors";
 import rateLimit from "express-rate-limit";
-import UAParser from "ua-parser-js";
 import geoip from "geoip-lite";
 
 const app = express();
@@ -13,7 +12,7 @@ app.use(express.json());
 const limiter = rateLimit({ windowMs: 60 * 1000, max: 30 });
 app.use(limiter);
 
-// MySQL connection pool (using environment variables)
+// MySQL connection pool using environment variables
 const pool = mysql.createPool({
   host: process.env.DB_HOST,
   user: process.env.DB_USER,
@@ -24,17 +23,17 @@ const pool = mysql.createPool({
   queueLimit: 0,
 });
 
-// Check code endpoint
+// Check code
 app.post("/check", async (req, res) => {
   const start = Date.now();
   const { code } = req.body;
   const ip = req.headers["x-forwarded-for"] || req.socket.remoteAddress || "";
-  const parser = new UAParser(req.headers["user-agent"] || "");
   const ua = req.headers["user-agent"] || "";
 
-  const browserName = parser.getBrowser().name || "Unknown";
-  const osName = parser.getOS().name || "Unknown";
-  const deviceType = parser.getDevice().type || "desktop";
+  // Defaults since UAParser is removed
+  const browserName = "Unknown";
+  const osName = "Unknown";
+  const deviceType = "Unknown";
   const languages = req.headers["accept-language"] || null;
 
   // GeoIP lookup
@@ -88,23 +87,6 @@ app.post("/check", async (req, res) => {
     res.json({ valid, url });
   } catch (err) {
     console.error("Check endpoint error:", err);
-    res.status(500).json({ error: "Internal server error" });
-  }
-});
-
-// Admin endpoint (optional, for adding codes)
-app.post("/admin/add", async (req, res) => {
-  const auth = req.headers.authorization || "";
-  if (!auth.startsWith("Bearer ") || auth.split(" ")[1] !== process.env.ADMIN_TOKEN) {
-    return res.status(401).json({ error: "Unauthorized" });
-  }
-
-  const { code, url } = req.body;
-  try {
-    await pool.query("INSERT INTO access_codes (code_value, url) VALUES (?, ?)", [code, url]);
-    res.json({ added: true });
-  } catch (err) {
-    console.error("Admin add error:", err);
     res.status(500).json({ error: "Internal server error" });
   }
 });
