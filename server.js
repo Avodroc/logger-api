@@ -1,19 +1,16 @@
 import express from "express";
 import mysql from "mysql2/promise";
+import bcrypt from "bcrypt";
 import cors from "cors";
 import rateLimit from "express-rate-limit";
-import bcrypt from "bcrypt";
-import geoip from "geoip-lite";
 
 const app = express();
-app.use(cors());
 app.use(express.json());
+app.use(cors());
 
-// Rate limiter
-const limiter = rateLimit({ windowMs: 60 * 1000, max: 30 });
-app.use(limiter);
-
-// MySQL connection pool using environment variables
+// -----------------------------
+// DATABASE CONNECTION
+// -----------------------------
 const pool = mysql.createPool({
   host: process.env.DB_HOST,
   user: process.env.DB_USER,
@@ -21,92 +18,189 @@ const pool = mysql.createPool({
   database: process.env.DB_NAME,
   waitForConnections: true,
   connectionLimit: 10,
-  queueLimit: 0,
 });
 
-// Check code
-app.post("/check", async (req, res) => {
-  const start = Date.now();
-  const { code } = req.body;
-  const ip = req.headers["x-forwarded-for"] || req.socket.remoteAddress || "";
-  const ua = req.headers["user-agent"] || "";
-  const languages = req.headers["accept-language"] || null;
-  const deviceType = /Mobi|Android/i.test(ua) ? "mobile" : "desktop";
-  const referer = req.headers.referer || "Direct";
+// -----------------------------
+// RATE LIMITER
+// -----------------------------
+const validateLimiter = rateLimit({
+  windowMs: 10 * 1000,
+  max: 5,
+  message: { error: "Too many requests, slow down." },
+});
 
-  // GeoIP lookup
-  const geo = geoip.lookup(ip) || {};
-  const country = geo.country || null;
-  const region = geo.region || null;
-  const city = geo.city || null;
+// -----------------------------
+// UTILS
+// -----------------------------
+function getClientIp(req) {
+  return (
+    req.headers["x-forwarded-for"]?.split(",")[0]?.trim() ||
+    req.connection?.remoteAddress ||
+    req.socket?.remoteAddress ||
+    req.ip ||
+    "Unknown"
+  );
+}
 
+// Detect browser name
+function detectBrowserName(ua) {
+  if (!ua) return "Other";
+  if (/Edg\//.test(ua) || /Edge\//.test(ua)) return "Edge";
+  if (/OPR\/|Opera\//.test(ua)) return "Opera";
+  if (/Chrome\//.test(ua) && !/Chromium/.test(ua)) return "Chrome";
+  if (/Safari\//.test(ua) && !/Chrome\//.test(ua)) return "Safari";
+  if (/Firefox\//.test(ua)) return "Firefox";
+  return "Other";
+}
+
+// Detect device type
+function detectDeviceType(ua) {
+  const s = ua?.toLowerCase() || "";
+  if (/mobile|iphone|android|iemobile|phone/i.test(s)) return "mobile";
+  if (/tablet|ipad/i.test(s)) return "tablet";
+  if (/bot|crawl|spider|bingpreview|pingdom/i.test(s)) return "bot";
+  return "desktop";
+}
+
+// -----------------------------
+// CHECK ENDPOINT
+// -----------------------------
+app.post("/check", validateLimiter, async (req, res) => {
   try {
-    // Get all codes from DB
-    const [rows] = await pool.query("SELECT * FROM access_codes");
-    let valid = false;
-    let url = "Failed";
+    if (!req.body || typeof req.body.code !== "string") {
+      return res.status(400).json({ error: "Missing or invalid code" });
+    }
+
+    const rawCode = req.body.code.trim();
+    if (!rawCode) return res.status(400).json({ error: "Code cannot be empty" });
+
+    const ip = getClientIp(req);
+    const user_agent =
+      req.headers["user-agent"] ||
+      req.body.browser ||
+      "Unknown UA";
+
+    // Accept these fields from client (Carrd sends them)
+    const incomingBrowser = req.body.browser || user_agent;
+    const incomingReferer = req.body.referer || req.headers.referer || "";
+    const incomingDeviceType = req.body.device_type || "";
+    const incomingOS = req.body.os || "";
+    const incomingBrowserName = req.body.browser_name || "";
+    const incomingLanguages = req.body.languages || "";
+
+    // Fetch all codes
+    const [rows] = await pool.query(
+      "SELECT id, code_hash, target_url FROM access_codes"
+    );
+
+    let foundUrl = "";
 
     for (const row of rows) {
-      // Check if code matches hash
-      if (await bcrypt.compare(code, row.code_hash)) {
-        valid = true;
-        url = row.url || "Failed";
-        break;
+      try {
+        const match = await bcrypt.compare(rawCode, row.code_hash);
+        if (match) {
+          foundUrl = row.target_url;
+          break;
+        }
+      } catch (err) {
+        console.error("bcrypt compare error:", err, row.id);
       }
     }
 
-    const status = valid ? "Success" : "Failed";
+    const status = foundUrl ? "Success" : "Failed";
 
-    // Count previous attempts
-    const [attemptRow] = await pool.query(
-      "SELECT COUNT(*) AS attempts FROM logs WHERE code = ? AND ip = ?",
-      [code, ip]
-    );
-    const attempt_number = attemptRow[0].attempts + 1;
+    // Compute attempt_number
+    let attempt_number = 1;
+    try {
+      const [countRows] = await pool.query(
+        "SELECT COUNT(*) AS cnt FROM logs WHERE ip = ? AND code = ?",
+        [ip, rawCode]
+      );
+      const cnt = countRows?.[0]?.cnt ?? 0;
+      attempt_number = cnt + 1;
+    } catch (err) {
+      console.error("Attempt count error:", err);
+    }
 
-    // Insert log
-    await pool.query(
+    // Final device / browser detection
+    const finalDeviceType =
+      incomingDeviceType || detectDeviceType(user_agent);
+
+    const finalBrowserName =
+      incomingBrowserName || detectBrowserName(user_agent);
+
+    // Insert into logs
+    await pool.execute(
       `INSERT INTO logs 
-      (code, url, status, browser, user_agent, referer, device_type, os, browser_name, languages, attempt_number, ip, country, region, city, response_ms) 
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        (code, url, status, browser, referer, device_type, os, browser_name, languages, attempt_number, ip, user_agent)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [
-        code,
-        url,
+        rawCode,
+        foundUrl,
         status,
-        ua,
-        ua,
-        referer,
-        deviceType,
-        "Unknown", // OS detection removed for now
-        "Unknown", // Browser name detection removed for now
-        languages,
+        incomingBrowser,
+        incomingReferer,
+        finalDeviceType,
+        incomingOS,
+        finalBrowserName,
+        incomingLanguages,
         attempt_number,
         ip,
-        country,
-        region,
-        city,
-        Date.now() - start,
+        user_agent,
       ]
     );
 
-    res.json({ valid, url });
+    return res.json({
+      valid: Boolean(foundUrl),
+      url: foundUrl,
+    });
   } catch (err) {
     console.error("Check endpoint error:", err);
-    res.status(500).json({ error: "Internal server error" });
+    return res.status(500).json({ error: "Internal server error" });
   }
 });
 
-// Admin logs
-app.get("/admin/logs", async (req, res) => {
+// -----------------------------
+// ADMIN: ADD NEW CODE
+// -----------------------------
+app.post("/admin/add", async (req, res) => {
   try {
-    const [rows] = await pool.query("SELECT * FROM logs ORDER BY created_at DESC");
-    res.json(rows);
+    const token = req.headers.authorization?.replace("Bearer ", "");
+
+    if (token !== process.env.ADMIN_TOKEN)
+      return res.status(403).send("Forbidden");
+
+    const code = req.body.code;
+    const url = req.body.url;
+
+    if (!code || !url)
+      return res.status(400).send("Missing code or url");
+
+    const hash = await bcrypt.hash(code, 10);
+
+    await pool.execute(
+      "INSERT INTO access_codes (code_hash, target_url) VALUES (?, ?)",
+      [hash, url]
+    );
+
+    res.redirect("/admin?added=1");
   } catch (err) {
-    console.error("Admin logs error:", err);
-    res.status(500).json({ error: "Internal server error" });
+    console.error("Admin add error:", err);
+    res.status(500).send("Internal error");
   }
 });
 
-// Start server
-const port = process.env.PORT || 10000;
-app.listen(port, () => console.log(`Server running on port ${port}`));
+// -----------------------------
+// ROOT
+// -----------------------------
+app.get("/", (req, res) => {
+  res.send("Logger API running.");
+});
+
+// -----------------------------
+// START SERVER
+// -----------------------------
+const PORT = process.env.PORT || 3001;
+app.listen(PORT, () =>
+  console.log(`Server running on port ${PORT}`)
+);
