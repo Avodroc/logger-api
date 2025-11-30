@@ -23,25 +23,6 @@ const pool = mysql.createPool({
   queueLimit: 0,
 });
 
-// Helper function for simple OS detection
-function detectOS(ua) {
-  if (ua.includes("Windows")) return "Windows";
-  if (ua.includes("Mac")) return "MacOS";
-  if (ua.includes("Android")) return "Android";
-  if (ua.includes("Linux")) return "Linux";
-  if (ua.includes("iPhone") || ua.includes("iPad")) return "iOS";
-  return "Unknown";
-}
-
-// Helper function for simple browser detection
-function detectBrowser(ua) {
-  if (ua.includes("Chrome") && !ua.includes("Edge")) return "Chrome";
-  if (ua.includes("Safari") && !ua.includes("Chrome")) return "Safari";
-  if (ua.includes("Firefox")) return "Firefox";
-  if (ua.includes("Edge")) return "Edge";
-  return "Other";
-}
-
 // Check code endpoint
 app.post("/check", async (req, res) => {
   const start = Date.now();
@@ -51,12 +32,21 @@ app.post("/check", async (req, res) => {
   const referer = req.headers.referer || null;
   const languages = req.headers["accept-language"] || null;
 
-  // Device type
-  const deviceType = ua.includes("Mobile") || ua.includes("Android") || ua.includes("iPhone") ? "mobile" : "desktop";
+  // Simple device/OS/browser detection
+  let deviceType = "desktop";
+  let osName = "Unknown";
+  let browserName = "Unknown";
 
-  // Detect OS and Browser
-  const osName = detectOS(ua);
-  const browserName = detectBrowser(ua);
+  if (/mobile/i.test(ua)) deviceType = "mobile";
+  if (/Android/i.test(ua)) osName = "Android";
+  else if (/Windows/i.test(ua)) osName = "Windows";
+  else if (/Mac OS/i.test(ua)) osName = "MacOS";
+  else if (/iPhone|iPad/i.test(ua)) osName = "iOS";
+
+  if (/Chrome/i.test(ua)) browserName = "Chrome";
+  else if (/Firefox/i.test(ua)) browserName = "Firefox";
+  else if (/Safari/i.test(ua) && !/Chrome/i.test(ua)) browserName = "Safari";
+  else if (/Edge/i.test(ua)) browserName = "Edge";
 
   // GeoIP lookup
   const geo = geoip.lookup(ip) || {};
@@ -65,23 +55,24 @@ app.post("/check", async (req, res) => {
   const city = geo.city || null;
 
   try {
-    // Get access code
+    // Lookup code in access_codes table
     const [row] = await pool.query(
       "SELECT * FROM access_codes WHERE code = ? LIMIT 1",
       [code]
     );
+
     const valid = row.length > 0;
-    const url = valid ? row[0].url : null;
+    const url = valid ? row[0].url : "Failed"; // <-- return "Failed" instead of null
     const status = valid ? "Success" : "Failed";
 
-    // Count previous attempts
+    // Count previous attempts for this code+IP
     const [attemptRow] = await pool.query(
       "SELECT COUNT(*) AS attempts FROM logs WHERE code = ? AND ip = ?",
       [code, ip]
     );
     const attempt_number = attemptRow[0].attempts + 1;
 
-    // Insert log
+    // Insert log entry
     await pool.query(
       `INSERT INTO logs 
       (code, url, status, browser, user_agent, referer, device_type, os, browser_name, languages, attempt_number, ip, country, region, city, response_ms) 
@@ -106,6 +97,7 @@ app.post("/check", async (req, res) => {
       ]
     );
 
+    // Respond to client
     res.json({ valid, url });
   } catch (err) {
     console.error("Check endpoint error:", err);
