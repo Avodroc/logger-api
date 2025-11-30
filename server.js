@@ -13,7 +13,7 @@ app.use(express.json());
 const limiter = rateLimit({ windowMs: 60 * 1000, max: 30 });
 app.use(limiter);
 
-// MySQL connection pool (environment variables)
+// MySQL connection pool using environment variables
 const pool = mysql.createPool({
   host: process.env.DB_HOST,
   user: process.env.DB_USER,
@@ -24,25 +24,25 @@ const pool = mysql.createPool({
   queueLimit: 0,
 });
 
-// ---------------- CHECK CODE ----------------
+// Check code endpoint
 app.post("/check", async (req, res) => {
   const start = Date.now();
   const { code } = req.body;
   const ip = req.headers["x-forwarded-for"] || req.socket.remoteAddress || "";
   const ua = req.headers["user-agent"] || "";
   const referer = req.headers.referer || null;
-  const device_type = /Mobi|Android/i.test(ua) ? "mobile" : "desktop";
+  const deviceType = /Mobi|Android/i.test(ua) ? "mobile" : "desktop";
   const languages = req.headers["accept-language"] || null;
 
+  // GeoIP lookup
   const geo = geoip.lookup(ip) || {};
   const country = geo.country || null;
   const region = geo.region || null;
   const city = geo.city || null;
 
   try {
-    // Fetch all hashed codes
-    const [rows] = await pool.query("SELECT * FROM access_codes WHERE code_hash IS NOT NULL");
-
+    // Get all access codes
+    const [rows] = await pool.query("SELECT * FROM access_codes");
     let valid = false;
     let url = null;
 
@@ -71,12 +71,12 @@ app.post("/check", async (req, res) => {
       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [
         code,
-        url || "Failed",
+        url,
         status,
         ua,
         ua,
         referer,
-        device_type,
+        deviceType,
         "Unknown",
         "Unknown",
         languages,
@@ -89,34 +89,28 @@ app.post("/check", async (req, res) => {
       ]
     );
 
-    res.json({ valid, url: url || "Failed" });
+    res.json({ valid, url });
   } catch (err) {
     console.error("Check endpoint error:", err);
     res.status(500).json({ error: "Internal server error" });
   }
 });
 
-// ---------------- ADMIN ADD CODE ----------------
+// Admin add endpoint
 app.post("/admin/add", async (req, res) => {
-  const { code, url } = req.body;
+  const authHeader = req.headers.authorization || "";
+  const token = authHeader.split(" ")[1];
+  if (token !== process.env.ADMIN_TOKEN) return res.status(403).send("Forbidden");
 
-  if (!code || !url) {
-    return res.status(400).json({ error: "Code and URL required" });
-  }
+  const { code, url } = req.body;
+  const hashed = await bcrypt.hash(code, 10);
 
   try {
-    // Hash the code before storing
-    const hash = await bcrypt.hash(code, 10);
-
-    await pool.query(
-      "INSERT INTO access_codes (code_hash, url) VALUES (?, ?)",
-      [hash, url]
-    );
-
-    res.json({ success: true, message: "Code added and hashed successfully" });
+    await pool.query("INSERT INTO access_codes (code_hash, url) VALUES (?, ?)", [hashed, url]);
+    res.send("Added");
   } catch (err) {
     console.error("Admin add error:", err);
-    res.status(500).json({ error: "Internal server error" });
+    res.status(500).send("Internal server error");
   }
 });
 
