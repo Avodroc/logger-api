@@ -44,7 +44,7 @@ app.post("/check", async (req, res) => {
 
   try {
     const [row] = await pool.query(
-      "SELECT * FROM access_codes WHERE code_value = ? LIMIT 1",
+      "SELECT * FROM access_codes WHERE code = ? LIMIT 1",
       [code]
     );
 
