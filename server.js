@@ -8,6 +8,16 @@ const app = express();
 app.use(express.json());
 app.use(cors());
 
+// ----------------------------------------------------
+// NEW: Skip ALL logging/DB/rate-limit for /health
+// ----------------------------------------------------
+app.use((req, res, next) => {
+  if (req.path === "/health") {
+    return next();  // do not log, do not rate limit, do not store
+  }
+  next();
+});
+
 // -----------------------------
 // DATABASE CONNECTION
 // -----------------------------
@@ -42,7 +52,6 @@ function getClientIp(req) {
   );
 }
 
-// Detect browser name
 function detectBrowserName(ua) {
   if (!ua) return "Other";
   if (/Edg\//.test(ua) || /Edge\//.test(ua)) return "Edge";
@@ -53,7 +62,6 @@ function detectBrowserName(ua) {
   return "Other";
 }
 
-// Detect device type
 function detectDeviceType(ua) {
   const s = ua?.toLowerCase() || "";
   if (/mobile|iphone|android|iemobile|phone/i.test(s)) return "mobile";
@@ -80,7 +88,6 @@ app.post("/check", validateLimiter, async (req, res) => {
       req.body.browser ||
       "Unknown UA";
 
-    // Accept these fields from client (Carrd sends them)
     const incomingBrowser = req.body.browser || user_agent;
     const incomingReferer = req.body.referer || req.headers.referer || "";
     const incomingDeviceType = req.body.device_type || "";
@@ -88,7 +95,6 @@ app.post("/check", validateLimiter, async (req, res) => {
     const incomingBrowserName = req.body.browser_name || "";
     const incomingLanguages = req.body.languages || "";
 
-    // Fetch all codes
     const [rows] = await pool.query(
       "SELECT id, code_hash, target_url FROM access_codes"
     );
@@ -122,14 +128,12 @@ app.post("/check", validateLimiter, async (req, res) => {
       console.error("Attempt count error:", err);
     }
 
-    // Final device / browser detection
     const finalDeviceType =
       incomingDeviceType || detectDeviceType(user_agent);
 
     const finalBrowserName =
       incomingBrowserName || detectBrowserName(user_agent);
 
-    // Insert into logs
     await pool.execute(
       `INSERT INTO logs 
         (code, url, status, browser, referer, device_type, os, browser_name, languages, attempt_number, ip, user_agent)
@@ -188,6 +192,13 @@ app.post("/admin/add", async (req, res) => {
     console.error("Admin add error:", err);
     res.status(500).send("Internal error");
   }
+});
+
+// -----------------------------
+// HEALTH
+// -----------------------------
+app.get("/health", (req, res) => {
+  res.status(200).send("OK");
 });
 
 // -----------------------------
