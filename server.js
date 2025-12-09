@@ -6,7 +6,7 @@ import rateLimit from "express-rate-limit";
 
 const app = express();
 
-// ✅ Fix express-rate-limit warning on Render
+// ✅ Fix express-rate-limit warning on Render 
 app.set("trust proxy", true);
 
 app.use(express.json());
